@@ -6,6 +6,7 @@ application-local.yaml
 !.env.example
 *.log
 logs/
+/chat-memory/
 *.pem
 *.key
 *.p12

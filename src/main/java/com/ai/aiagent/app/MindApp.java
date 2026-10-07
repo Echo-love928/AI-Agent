@@ -1,10 +1,11 @@
 package com.ai.aiagent.app;
 
+import com.ai.aiagent.advisor.MyLoggerAdvisor;
+import com.ai.aiagent.chatmemory.FileBasedChatMemory;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
-import org.springframework.ai.chat.memory.MessageWindowChatMemory;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -13,7 +14,10 @@ import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Component;
 import org.springframework.util.Assert;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 @Component
 @Slf4j
@@ -21,19 +25,18 @@ public class MindApp {
 
     private final ChatClient chatClient;
 
-    private static final int CHAT_MEMORY_SIZE = 10;
-
     private static final Resource SYSTEM_PROMPT =
             new ClassPathResource("prompts/psychological-support-system.txt");
 
     public MindApp(@Qualifier("dashScopeChatModel") ChatModel dashScopeChatModel) {
-        // 初始化基于内存的对话记忆，保留最近 10 条消息（用户和 AI 消息均计入）。
-        ChatMemory chatMemory = MessageWindowChatMemory.builder()
-                .maxMessages(CHAT_MEMORY_SIZE)
-                .build();
+        // 初始化基于文件的对话记忆，同一 chatId 的历史消息可在应用重启后读取。
+        String fileDir = System.getProperty("user.dir") + "/chat-memory";
+        ChatMemory chatMemory = new FileBasedChatMemory(fileDir);
         chatClient = ChatClient.builder(dashScopeChatModel)
                 .defaultSystem(SYSTEM_PROMPT, StandardCharsets.UTF_8)
-                .defaultAdvisors(MessageChatMemoryAdvisor.builder(chatMemory).build())
+                .defaultAdvisors(
+                        MessageChatMemoryAdvisor.builder(chatMemory).build(),
+                        new MyLoggerAdvisor())
                 .build();
     }
 
@@ -56,5 +59,35 @@ public class MindApp {
         String content = response.getResult().getOutput().getText();
         log.info("心理树洞对话调用完成");
         return content;
+    }
+
+    public record MindReport(String title, List<String> suggestions) {
+    }
+
+    /**
+     * 基于当前会话生成包含标题和建议列表的心理报告。(实战结构化输出)
+     */
+    public MindReport doChatWithReport(String message, String chatId) {
+        Assert.hasText(message, "message 不能为空");
+        Assert.hasText(chatId, "chatId 不能为空");
+
+        String reportSystemPrompt;
+        try {
+            reportSystemPrompt = SYSTEM_PROMPT.getContentAsString(StandardCharsets.UTF_8)
+                    + "\n每次对话后都要生成心理状况结果，标题为{用户名}的心理报告，内容为建议列表";
+        } catch (IOException e) {
+            throw new UncheckedIOException("无法读取心理支持系统提示词", e);
+        }
+
+        MindReport mindReport = chatClient
+                .prompt()
+                // 通过参数传入完整提示词，将 {用户名} 保留为模型理解的标题格式。
+                .system(spec -> spec.text("{reportSystemPrompt}").param("reportSystemPrompt", reportSystemPrompt))
+                .user(message)
+                .advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, chatId))
+                .call()
+                .entity(MindReport.class);
+        log.info("mindReport: {}", mindReport);
+        return mindReport;
     }
 }

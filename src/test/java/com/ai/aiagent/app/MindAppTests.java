@@ -1,7 +1,10 @@
 package com.ai.aiagent.app;
 
 import com.alibaba.cloud.ai.autoconfigure.dashscope.DashScopeChatAutoConfiguration;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
@@ -14,7 +17,11 @@ import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.core.io.ClassPathResource;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -27,6 +34,22 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class MindAppTests {
+
+    @TempDir
+    Path workingDirectory;
+
+    private String previousUserDir;
+
+    @BeforeEach
+    void useTemporaryMemoryDirectory() {
+        previousUserDir = System.getProperty("user.dir");
+        System.setProperty("user.dir", workingDirectory.toString());
+    }
+
+    @AfterEach
+    void restoreWorkingDirectory() {
+        System.setProperty("user.dir", previousUserDir);
+    }
 
     @Test
     void completesThreeRoundsWithOrderedUserAndAssistantHistory() {
@@ -113,7 +136,7 @@ class MindAppTests {
     }
 
     @Test
-    void keepsAtMostTenHistoryMessages() {
+    void retainsFileHistoryBeyondTenMessages() {
         List<Prompt> prompts = new ArrayList<>();
         MindApp mindApp = createMindApp(prompts);
 
@@ -122,10 +145,85 @@ class MindAppTests {
         }
 
         Prompt lastPrompt = prompts.getLast();
-        // 10 条历史消息，加默认系统提示词和本轮用户消息。
-        assertThat(lastPrompt.getInstructions()).hasSize(12);
+        // 文件记忆保留全部历史：12 条历史消息，加默认系统提示词和本轮用户消息。
+        assertThat(lastPrompt.getInstructions()).hasSize(14);
         assertThat(userMessages(lastPrompt))
-                .containsExactly("消息2", "消息3", "消息4", "消息5", "消息6", "消息7");
+                .containsExactly("消息1", "消息2", "消息3", "消息4", "消息5", "消息6", "消息7");
+    }
+
+    @Test
+    void resumesConversationAfterMindAppIsRecreated() {
+        List<Prompt> prompts = new ArrayList<>();
+        MindApp firstApp = createMindApp(prompts);
+        firstApp.doChat("最近工作压力很大", "persisted-chat");
+
+        assertThat(workingDirectory.resolve("chat-memory/persisted-chat.kryo")).exists();
+        MindApp reloadedApp = createMindApp(prompts);
+        reloadedApp.doChat("结合刚才的情况继续聊聊", "persisted-chat");
+
+        assertThat(conversationMessages(prompts.getLast()))
+                .extracting(Message::getMessageType, Message::getText)
+                .containsExactly(tuple(MessageType.USER, "最近工作压力很大"),
+                        tuple(MessageType.ASSISTANT, "测试回复"),
+                        tuple(MessageType.USER, "结合刚才的情况继续聊聊"));
+    }
+
+    @Test
+    void generatesStructuredReportWithOriginalSystemPrompt() throws IOException {
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.call(any(Prompt.class))).thenReturn(new ChatResponse(List.of(new Generation(
+                new AssistantMessage("""
+                        {"title":"小明的心理报告","suggestions":["安排短暂休息","整理压力来源"]}
+                        """)))));
+        MindApp mindApp = new MindApp(chatModel);
+
+        MindApp.MindReport report = mindApp.doChatWithReport("我叫小明，最近工作压力很大", "report-chat");
+
+        assertThat(report.title()).isEqualTo("小明的心理报告");
+        assertThat(report.suggestions()).containsExactly("安排短暂休息", "整理压力来源");
+        ArgumentCaptor<Prompt> captor = ArgumentCaptor.forClass(Prompt.class);
+        verify(chatModel).call(captor.capture());
+        Prompt prompt = captor.getValue();
+        String originalSystemPrompt = new ClassPathResource("prompts/psychological-support-system.txt")
+                .getContentAsString(StandardCharsets.UTF_8);
+        assertThat(prompt.getSystemMessage().getText()).isEqualToNormalizingNewlines(originalSystemPrompt
+                + "\n每次对话后都要生成心理状况结果，标题为{用户名}的心理报告，内容为建议列表");
+        assertThat(prompt.getUserMessage().getText()).contains("title", "suggestions");
+    }
+
+    @Test
+    void reportSharesConversationMemoryAndDoesNotChangeDefaultSystemPrompt() throws IOException {
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.call(any(Prompt.class))).thenReturn(
+                new ChatResponse(List.of(new Generation(new AssistantMessage("之前的回复")))),
+                new ChatResponse(List.of(new Generation(new AssistantMessage(
+                        "{\"title\":\"小明的心理报告\",\"suggestions\":[\"适当休息\"]}")))),
+                new ChatResponse(List.of(new Generation(new AssistantMessage("继续聊聊")))),
+                new ChatResponse(List.of(new Generation(new AssistantMessage(
+                        "{\"title\":\"用户的心理报告\",\"suggestions\":[\"梳理感受\"]}")))));
+        MindApp mindApp = new MindApp(chatModel);
+
+        mindApp.doChat("我叫小明，最近工作压力很大", "shared-chat");
+        mindApp.doChatWithReport("结合刚才的对话给我建议", "shared-chat");
+        mindApp.doChat("继续聊聊", "shared-chat");
+        mindApp.doChatWithReport("我想聊家庭关系", "other-chat");
+
+        ArgumentCaptor<Prompt> captor = ArgumentCaptor.forClass(Prompt.class);
+        verify(chatModel, times(4)).call(captor.capture());
+        List<Prompt> prompts = captor.getAllValues();
+        assertThat(userMessages(prompts.get(1))).hasSize(2);
+        assertThat(userMessages(prompts.get(1)).getFirst()).isEqualTo("我叫小明，最近工作压力很大");
+        assertThat(userMessages(prompts.get(1)).getLast()).startsWith("结合刚才的对话给我建议");
+        assertThat(prompts.get(1).getInstructions()).filteredOn(message -> message instanceof AssistantMessage)
+                .extracting(Message::getText).containsExactly("之前的回复");
+        assertThat(userMessages(prompts.get(2))).hasSize(3);
+        assertThat(prompts.get(2).getInstructions()).filteredOn(message -> message instanceof AssistantMessage)
+                .extracting(Message::getText).hasSize(2);
+        assertThat(prompts.get(2).getSystemMessage().getText()).isEqualTo(
+                new ClassPathResource("prompts/psychological-support-system.txt")
+                        .getContentAsString(StandardCharsets.UTF_8));
+        assertThat(userMessages(prompts.get(3))).hasSize(1);
+        assertThat(userMessages(prompts.get(3)).getFirst()).startsWith("我想聊家庭关系");
     }
 
     private void printRound(int round, String message, String reply) {
