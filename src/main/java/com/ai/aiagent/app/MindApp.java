@@ -5,9 +5,11 @@ import com.ai.aiagent.chatmemory.FileBasedChatMemory;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
+import org.springframework.ai.chat.client.advisor.vectorstore.QuestionAnswerAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.Resource;
@@ -25,10 +27,14 @@ public class MindApp {
 
     private final ChatClient chatClient;
 
+    private final VectorStore mindAppVectorStore;
+
     private static final Resource SYSTEM_PROMPT =
             new ClassPathResource("prompts/psychological-support-system.txt");
 
-    public MindApp(@Qualifier("dashScopeChatModel") ChatModel dashScopeChatModel) {
+    public MindApp(@Qualifier("dashScopeChatModel") ChatModel dashScopeChatModel,
+                   @Qualifier("mindAppVectorStore") VectorStore mindAppVectorStore) {
+        this.mindAppVectorStore = mindAppVectorStore;
         // 初始化基于文件的对话记忆，同一 chatId 的历史消息可在应用重启后读取。
         String fileDir = System.getProperty("user.dir") + "/chat-memory";
         ChatMemory chatMemory = new FileBasedChatMemory(fileDir);
@@ -58,6 +64,28 @@ public class MindApp {
         }
         String content = response.getResult().getOutput().getText();
         log.info("心理树洞对话调用完成");
+        return content;
+    }
+
+    /**
+     * 检索心理树洞知识库后回复用户，并沿用同一 chatId 的对话记忆。
+     */
+    public String doChatWithRag(String message, String chatId) {
+        Assert.hasText(message, "message 不能为空");
+        Assert.hasText(chatId, "chatId 不能为空");
+
+        ChatResponse response = chatClient
+                .prompt()
+                .user(message)
+                .advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, chatId))
+                .advisors(QuestionAnswerAdvisor.builder(mindAppVectorStore).build())
+                .call()
+                .chatResponse();
+        if (response == null || response.getResult() == null || response.getResult().getOutput() == null) {
+            throw new IllegalStateException("模型未返回有效回复");
+        }
+        String content = response.getResult().getOutput().getText();
+        log.info("心理树洞 RAG 对话调用完成");
         return content;
     }
 
