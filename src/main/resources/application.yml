@@ -3,6 +3,14 @@ spring:
     name: AI-Agent
   profiles:
     active: local
+# 本地知识库向量持久化配置
+rag:
+  vector-store:
+    path: data/mind-vector-store.json
+    # 强制重建时设为 true，重建完成后改回 false。
+    rebuild: false
+    # 修改解析或关键词规则时递增，使已有缓存失效。
+    cache-version: 1
 server:
   port: 8123
   servlet:

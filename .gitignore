@@ -7,6 +7,7 @@ application-local.yaml
 *.log
 logs/
 /chat-memory/
+/data/
 *.pem
 *.key
 *.p12

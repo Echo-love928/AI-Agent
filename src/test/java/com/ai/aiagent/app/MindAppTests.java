@@ -1,6 +1,7 @@
 package com.ai.aiagent.app;
 
 import com.alibaba.cloud.ai.autoconfigure.dashscope.DashScopeChatAutoConfiguration;
+import com.ai.aiagent.rag.QueryRewriter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -66,7 +67,7 @@ class MindAppTests {
                 new ChatResponse(List.of(new Generation(new AssistantMessage(firstReply)))),
                 new ChatResponse(List.of(new Generation(new AssistantMessage(secondReply)))),
                 new ChatResponse(List.of(new Generation(new AssistantMessage(thirdReply)))));
-        MindApp mindApp = new MindApp(chatModel, mock(VectorStore.class));
+        MindApp mindApp = new MindApp(chatModel, mock(VectorStore.class), mock(QueryRewriter.class));
 
         String firstResult = mindApp.doChat(firstMessage, chatId);
         printRound(1, firstMessage, firstResult);
@@ -109,7 +110,7 @@ class MindAppTests {
         // 只验证自动装配，使用占位 API Key，不调用模型。
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(DashScopeChatAutoConfiguration.class))
-                .withUserConfiguration(MindApp.class)
+                .withUserConfiguration(MindApp.class, QueryRewriter.class)
                 .withBean("mindAppVectorStore", VectorStore.class, () -> mock(VectorStore.class))
                 .withPropertyValues("spring.ai.dashscope.api-key=test-key")
                 .run(context -> {
@@ -177,7 +178,7 @@ class MindAppTests {
                 new AssistantMessage("""
                         {"title":"小明的心理报告","suggestions":["安排短暂休息","整理压力来源"]}
                         """)))));
-        MindApp mindApp = new MindApp(chatModel, mock(VectorStore.class));
+        MindApp mindApp = new MindApp(chatModel, mock(VectorStore.class), mock(QueryRewriter.class));
 
         MindApp.MindReport report = mindApp.doChatWithReport("我叫小明，最近工作压力很大", "report-chat");
 
@@ -203,7 +204,7 @@ class MindAppTests {
                 new ChatResponse(List.of(new Generation(new AssistantMessage("继续聊聊")))),
                 new ChatResponse(List.of(new Generation(new AssistantMessage(
                         "{\"title\":\"用户的心理报告\",\"suggestions\":[\"梳理感受\"]}")))));
-        MindApp mindApp = new MindApp(chatModel, mock(VectorStore.class));
+        MindApp mindApp = new MindApp(chatModel, mock(VectorStore.class), mock(QueryRewriter.class));
 
         mindApp.doChat("我叫小明，最近工作压力很大", "shared-chat");
         mindApp.doChatWithReport("结合刚才的对话给我建议", "shared-chat");
@@ -238,7 +239,7 @@ class MindAppTests {
             prompts.add(invocation.getArgument(0));
             return new ChatResponse(List.of(new Generation(new AssistantMessage("测试回复"))));
         });
-        return new MindApp(chatModel, mock(VectorStore.class));
+        return new MindApp(chatModel, mock(VectorStore.class), mock(QueryRewriter.class));
     }
 
     private List<String> userMessages(Prompt prompt) {

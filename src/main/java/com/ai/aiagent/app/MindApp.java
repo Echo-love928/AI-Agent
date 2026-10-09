@@ -2,17 +2,21 @@ package com.ai.aiagent.app;
 
 import com.ai.aiagent.advisor.MyLoggerAdvisor;
 import com.ai.aiagent.chatmemory.FileBasedChatMemory;
+import com.ai.aiagent.rag.MindAppContextualQueryAugmenterFactory;
+import com.ai.aiagent.rag.QueryRewriter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
-import org.springframework.ai.chat.client.advisor.vectorstore.QuestionAnswerAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.rag.advisor.RetrievalAugmentationAdvisor;
+import org.springframework.ai.rag.retrieval.search.VectorStoreDocumentRetriever;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.Resource;
+import org.springframework.core.task.SyncTaskExecutor;
 import org.springframework.stereotype.Component;
 import org.springframework.util.Assert;
 
@@ -27,14 +31,24 @@ public class MindApp {
 
     private final ChatClient chatClient;
 
-    private final VectorStore mindAppVectorStore;
+    private final RetrievalAugmentationAdvisor ragAdvisor;
 
     private static final Resource SYSTEM_PROMPT =
             new ClassPathResource("prompts/psychological-support-system.txt");
 
     public MindApp(@Qualifier("dashScopeChatModel") ChatModel dashScopeChatModel,
-                   @Qualifier("mindAppVectorStore") VectorStore mindAppVectorStore) {
-        this.mindAppVectorStore = mindAppVectorStore;
+                   @Qualifier("mindAppVectorStore") VectorStore mindAppVectorStore,
+                   QueryRewriter queryRewriter) {
+        ragAdvisor = RetrievalAugmentationAdvisor.builder()
+                .queryTransformers(query -> query.mutate()
+                        .text(queryRewriter.doQueryRewrite(query.text())).build())
+                .documentRetriever(VectorStoreDocumentRetriever.builder()
+                        .vectorStore(mindAppVectorStore).build())
+                // 工厂统一配置文档上下文和空检索结果的提示词。
+                .queryAugmenter(MindAppContextualQueryAugmenterFactory.createInstance())
+                // 单次查询使用当前线程，避免为每个 MindApp 创建检索线程池。
+                .taskExecutor(new SyncTaskExecutor())
+                .build();
         // 初始化基于文件的对话记忆，同一 chatId 的历史消息可在应用重启后读取。
         String fileDir = System.getProperty("user.dir") + "/chat-memory";
         ChatMemory chatMemory = new FileBasedChatMemory(fileDir);
@@ -68,7 +82,7 @@ public class MindApp {
     }
 
     /**
-     * 检索心理树洞知识库后回复用户，并沿用同一 chatId 的对话记忆。
+     * 重写查询并检索心理树洞知识库后回复用户，沿用同一 chatId 的对话记忆。
      */
     public String doChatWithRag(String message, String chatId) {
         Assert.hasText(message, "message 不能为空");
@@ -78,7 +92,7 @@ public class MindApp {
                 .prompt()
                 .user(message)
                 .advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, chatId))
-                .advisors(QuestionAnswerAdvisor.builder(mindAppVectorStore).build())
+                .advisors(ragAdvisor)
                 .call()
                 .chatResponse();
         if (response == null || response.getResult() == null || response.getResult().getOutput() == null) {

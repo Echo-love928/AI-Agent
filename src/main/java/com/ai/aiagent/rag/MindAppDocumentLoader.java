@@ -9,6 +9,7 @@ import org.springframework.core.io.support.ResourcePatternResolver;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -46,7 +47,8 @@ public class MindAppDocumentLoader {
             }
             log.info("已加载 {} 个 Markdown 文件，解析为 {} 个文档", resources.length, allDocuments.size());
         } catch (IOException e) {
-            log.error("Markdown 文档加载失败", e);
+            // 加载失败时中止初始化，避免用不完整的文档覆盖已持久化的向量库。
+            throw new UncheckedIOException("Markdown 文档加载失败", e);
         }
         return allDocuments;
     }

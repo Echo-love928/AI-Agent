@@ -1,6 +1,7 @@
 package com.ai.aiagent.app;
 
 import com.ai.aiagent.rag.MindAppDocumentLoader;
+import com.ai.aiagent.rag.QueryRewriter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -56,6 +57,7 @@ class MindAppRagTests {
     @Test
     void answersQuestionCoveredByMarkdownAndSharesConversationMemory() throws IOException {
         String question = "被领导批评后，我总觉得自己很差，怎么办？";
+        String rewrittenQuery = "职场批评后的自我否定如何调整";
         String chatId = "rag-known-answer-chat";
         MindAppDocumentLoader loader = new MindAppDocumentLoader(new PathMatchingResourcePatternResolver());
         Document answerDocument = loader.loadMarkdowns().stream()
@@ -72,9 +74,10 @@ class MindAppRagTests {
         String expectedReply = "被批评后难受可以理解。可以先把具体反馈与对自己的整体否定分开，"
                 + "再确认这次需要修改的内容，例如问：您希望我优先修改哪一部分？";
         when(chatModel.call(any(Prompt.class))).thenReturn(
+                new ChatResponse(List.of(new Generation(new AssistantMessage(rewrittenQuery)))),
                 new ChatResponse(List.of(new Generation(new AssistantMessage(expectedReply)))),
                 new ChatResponse(List.of(new Generation(new AssistantMessage("可以先从这次报告要补充的数据开始。")))));
-        MindApp mindApp = new MindApp(chatModel, vectorStore);
+        MindApp mindApp = new MindApp(chatModel, vectorStore, new QueryRewriter(chatModel));
 
         String reply = mindApp.doChatWithRag(question, chatId);
         assertThat(reply).isEqualTo(expectedReply);
@@ -87,12 +90,14 @@ class MindAppRagTests {
 
         ArgumentCaptor<SearchRequest> searchCaptor = ArgumentCaptor.forClass(SearchRequest.class);
         verify(vectorStore).similaritySearch(searchCaptor.capture());
-        assertThat(searchCaptor.getValue().getQuery()).isEqualTo(question);
+        assertThat(searchCaptor.getValue().getQuery()).isEqualTo(rewrittenQuery);
         ArgumentCaptor<Prompt> promptCaptor = ArgumentCaptor.forClass(Prompt.class);
-        verify(chatModel, times(2)).call(promptCaptor.capture());
+        verify(chatModel, times(3)).call(promptCaptor.capture());
         List<Prompt> prompts = promptCaptor.getAllValues();
-        assertThat(prompts.getFirst().getUserMessage().getText()).contains(question, answerDocument.getText());
-        assertThat(prompts.getFirst().getSystemMessage().getText()).isEqualTo(
+        assertThat(prompts.getFirst().getUserMessage().getText()).contains(question, "Rewritten query:");
+        assertThat(prompts.get(1).getUserMessage().getText()).contains(question, answerDocument.getText())
+                .doesNotContain(rewrittenQuery);
+        assertThat(prompts.get(1).getSystemMessage().getText()).isEqualTo(
                 new ClassPathResource("prompts/psychological-support-system.txt")
                         .getContentAsString(StandardCharsets.UTF_8));
         assertThat(prompts.getLast().getInstructions())
@@ -109,13 +114,14 @@ class MindAppRagTests {
     void rejectsBlankInputsBeforeRetrievingOrCallingModel() {
         ChatModel chatModel = mock(ChatModel.class);
         VectorStore vectorStore = mock(VectorStore.class);
-        MindApp mindApp = new MindApp(chatModel, vectorStore);
+        QueryRewriter queryRewriter = mock(QueryRewriter.class);
+        MindApp mindApp = new MindApp(chatModel, vectorStore, queryRewriter);
 
         assertThatIllegalArgumentException().isThrownBy(() -> mindApp.doChatWithRag(" ", "chat-1"))
                 .withMessage("message 不能为空");
         assertThatIllegalArgumentException().isThrownBy(() -> mindApp.doChatWithRag("我想聊聊", " "))
                 .withMessage("chatId 不能为空");
-        verifyNoInteractions(vectorStore);
+        verifyNoInteractions(vectorStore, queryRewriter);
         verify(chatModel, never()).call(any(Prompt.class));
     }
 
@@ -125,9 +131,40 @@ class MindAppRagTests {
         VectorStore vectorStore = mock(VectorStore.class);
         when(vectorStore.similaritySearch(any(SearchRequest.class))).thenReturn(List.of());
         when(chatModel.call(any(Prompt.class))).thenReturn(new ChatResponse(List.of()));
-        MindApp mindApp = new MindApp(chatModel, vectorStore);
+        QueryRewriter queryRewriter = mock(QueryRewriter.class);
+        when(queryRewriter.doQueryRewrite("我想聊聊")).thenReturn("心理支持");
+        MindApp mindApp = new MindApp(chatModel, vectorStore, queryRewriter);
 
         assertThatIllegalStateException().isThrownBy(() -> mindApp.doChatWithRag("我想聊聊", "chat-1"))
                 .withMessage("模型未返回有效回复");
+    }
+
+    @Test
+    void blankRewriteUsesOriginalQueryAndEmptyRetrievalUsesCustomPromptWhilePreservingMemory() {
+        ChatModel chatModel = mock(ChatModel.class);
+        VectorStore vectorStore = mock(VectorStore.class);
+        when(vectorStore.similaritySearch(any(SearchRequest.class))).thenReturn(List.of());
+        when(chatModel.call(any(Prompt.class))).thenReturn(
+                new ChatResponse(List.of(new Generation(new AssistantMessage(" ")))),
+                new ChatResponse(List.of(new Generation(new AssistantMessage("知识库中暂无相关回答。")))),
+                new ChatResponse(List.of(new Generation(new AssistantMessage("可以继续说说你的具体情境。")))));
+        MindApp mindApp = new MindApp(chatModel, vectorStore, new QueryRewriter(chatModel));
+        String question = "最近一直担心工作做不好，怎么办？";
+
+        assertThat(mindApp.doChatWithRag(question, "empty-context-chat")).isEqualTo("知识库中暂无相关回答。");
+        String followUp = "那我补充一下具体情况";
+        mindApp.doChat(followUp, "empty-context-chat");
+
+        ArgumentCaptor<SearchRequest> searchCaptor = ArgumentCaptor.forClass(SearchRequest.class);
+        verify(vectorStore).similaritySearch(searchCaptor.capture());
+        assertThat(searchCaptor.getValue().getQuery()).isEqualTo(question);
+        ArgumentCaptor<Prompt> promptCaptor = ArgumentCaptor.forClass(Prompt.class);
+        verify(chatModel, times(3)).call(promptCaptor.capture());
+        List<Prompt> prompts = promptCaptor.getAllValues();
+        assertThat(prompts.get(1).getUserMessage().getText())
+                .contains("当前知识库暂时没有找到相关内容", "情绪、压力和人际关系")
+                .doesNotContain(question);
+        assertThat(prompts.getLast().getInstructions()).filteredOn(message -> message instanceof UserMessage)
+                .extracting(Message::getText).containsExactly(question, followUp);
     }
 }
