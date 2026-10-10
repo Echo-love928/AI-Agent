@@ -1,11 +1,14 @@
 ### CUSTOM ###
 application-local.yml
+tmp
+constant
 application-local.yaml
 .env
 .env.*
 !.env.example
 *.log
 logs/
+/tmp/chat-memory/
 /chat-memory/
 /data/
 *.pem

@@ -12,6 +12,7 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.rag.advisor.RetrievalAugmentationAdvisor;
 import org.springframework.ai.rag.retrieval.search.VectorStoreDocumentRetriever;
+import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.io.ClassPathResource;
@@ -32,6 +33,9 @@ public class MindApp {
     private final ChatClient chatClient;
 
     private final RetrievalAugmentationAdvisor ragAdvisor;
+
+    @jakarta.annotation.Resource
+    private ToolCallback[] allTools;
 
     private static final Resource SYSTEM_PROMPT =
             new ClassPathResource("prompts/psychological-support-system.txt");
@@ -100,6 +104,29 @@ public class MindApp {
         }
         String content = response.getResult().getOutput().getText();
         log.info("心理树洞 RAG 对话调用完成");
+        return content;
+    }
+
+    /**
+     * 绑定所有已注册的工具后回复用户，沿用同一 chatId 的对话记忆。
+     */
+    public String doChatWithTools(String message, String chatId) {
+        Assert.hasText(message, "message 不能为空");
+        Assert.hasText(chatId, "chatId 不能为空");
+
+        ChatResponse response = chatClient
+                .prompt()
+                .user(message)
+                .advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, chatId))
+                // Spring AI 1.1.x 使用 toolCallbacks 绑定 ToolCallback 数组。
+                .toolCallbacks(allTools)
+                .call()
+                .chatResponse();
+        if (response == null || response.getResult() == null || response.getResult().getOutput() == null) {
+            throw new IllegalStateException("模型未返回有效回复");
+        }
+        String content = response.getResult().getOutput().getText();
+        log.info("心理树洞工具对话调用完成");
         return content;
     }
 

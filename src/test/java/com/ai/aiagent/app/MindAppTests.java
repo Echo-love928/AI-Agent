@@ -16,10 +16,15 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.model.tool.ToolCallingChatOptions;
+import org.springframework.ai.support.ToolCallbacks;
+import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -112,6 +117,7 @@ class MindAppTests {
                 .withConfiguration(AutoConfigurations.of(DashScopeChatAutoConfiguration.class))
                 .withUserConfiguration(MindApp.class, QueryRewriter.class)
                 .withBean("mindAppVectorStore", VectorStore.class, () -> mock(VectorStore.class))
+                .withBean("allTools", ToolCallback[].class, () -> new ToolCallback[0])
                 .withPropertyValues("spring.ai.dashscope.api-key=test-key")
                 .run(context -> {
                     assertThat(context).hasNotFailed();
@@ -227,6 +233,38 @@ class MindAppTests {
                         .getContentAsString(StandardCharsets.UTF_8));
         assertThat(userMessages(prompts.get(3))).hasSize(1);
         assertThat(userMessages(prompts.get(3)).getFirst()).startsWith("我想聊家庭关系");
+    }
+
+    @Test
+    void bindsRegisteredToolsAndSharesConversationMemory() {
+        List<Prompt> prompts = new ArrayList<>();
+        MindApp mindApp = createMindApp(prompts);
+        ToolCallback[] allTools = ToolCallbacks.from(new TestTools());
+        ReflectionTestUtils.setField(mindApp, "allTools", allTools);
+
+        mindApp.doChat("我叫小明", "tools-chat");
+        assertThat(mindApp.doChatWithTools("帮我查看工具返回的建议", "tools-chat"))
+                .isEqualTo("测试回复");
+        mindApp.doChatWithTools("我想聊工作压力", "other-tools-chat");
+        mindApp.doChat("继续聊聊", "tools-chat");
+
+        assertThat(prompts.get(1).getOptions()).isInstanceOf(ToolCallingChatOptions.class);
+        ToolCallingChatOptions options = (ToolCallingChatOptions) prompts.get(1).getOptions();
+        assertThat(options.getToolCallbacks()).containsExactly(allTools);
+        assertThat(userMessages(prompts.get(1)))
+                .containsExactly("我叫小明", "帮我查看工具返回的建议");
+        assertThat(userMessages(prompts.get(2))).containsExactly("我想聊工作压力");
+        assertThat(userMessages(prompts.get(3)))
+                .containsExactly("我叫小明", "帮我查看工具返回的建议", "继续聊聊");
+        assertThat(prompts.get(3).getOptions()).isNull();
+    }
+
+    static class TestTools {
+
+        @Tool(description = "返回测试建议")
+        String suggestion() {
+            return "适当休息";
+        }
     }
 
     private void printRound(int round, String message, String reply) {
