@@ -3,6 +3,7 @@ application-local.yml
 tmp
 constant
 application-local.yaml
+/src/main/resources/mcp-servers.json
 .env
 .env.*
 !.env.example

@@ -4,15 +4,18 @@ import com.ai.aiagent.advisor.MyLoggerAdvisor;
 import com.ai.aiagent.chatmemory.FileBasedChatMemory;
 import com.ai.aiagent.rag.MindAppContextualQueryAugmenterFactory;
 import com.ai.aiagent.rag.QueryRewriter;
+import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.rag.advisor.RetrievalAugmentationAdvisor;
 import org.springframework.ai.rag.retrieval.search.VectorStoreDocumentRetriever;
 import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.io.ClassPathResource;
@@ -34,8 +37,15 @@ public class MindApp {
 
     private final RetrievalAugmentationAdvisor ragAdvisor;
 
+    private final String mcpSystemPrompt;
+
+    private final ChatOptions mcpChatOptions;
+
     @jakarta.annotation.Resource
     private ToolCallback[] allTools;
+
+    @jakarta.annotation.Resource
+    private ToolCallbackProvider toolCallbackProvider;
 
     private static final Resource SYSTEM_PROMPT =
             new ClassPathResource("prompts/psychological-support-system.txt");
@@ -43,6 +53,21 @@ public class MindApp {
     public MindApp(@Qualifier("dashScopeChatModel") ChatModel dashScopeChatModel,
                    @Qualifier("mindAppVectorStore") VectorStore mindAppVectorStore,
                    QueryRewriter queryRewriter) {
+        try {
+            mcpSystemPrompt = SYSTEM_PROMPT.getContentAsString(StandardCharsets.UTF_8) + "\n\n"
+                    + new ClassPathResource("prompts/mcp-map-system.txt")
+                    .getContentAsString(StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new UncheckedIOException("无法读取 MCP 对话系统提示词", e);
+        }
+        if (dashScopeChatModel.getDefaultOptions() instanceof DashScopeChatOptions defaultOptions) {
+            // 保留配置中的模型与 multi-model 等选项，只降低 MCP 对话的采样温度。
+            DashScopeChatOptions options = DashScopeChatOptions.fromOptions(defaultOptions);
+            options.setTemperature(0.0);
+            mcpChatOptions = options;
+        } else {
+            mcpChatOptions = ChatOptions.builder().temperature(0.0).build();
+        }
         ragAdvisor = RetrievalAugmentationAdvisor.builder()
                 .queryTransformers(query -> query.mutate()
                         .text(queryRewriter.doQueryRewrite(query.text())).build())
@@ -127,6 +152,32 @@ public class MindApp {
         }
         String content = response.getResult().getOutput().getText();
         log.info("心理树洞工具对话调用完成");
+        return content;
+    }
+
+    /**
+     * 使用配置中 MCP 服务提供的全部工具回复用户，沿用同一 chatId 的对话记忆。
+     */
+    public String doChatWithMcp(String message, String chatId) {
+        Assert.hasText(message, "message 不能为空");
+        Assert.hasText(chatId, "chatId 不能为空");
+
+        ChatResponse response = chatClient
+                .prompt()
+                // 保留心理支持规则，仅本次 MCP 请求追加地图工具使用规则。
+                .system(spec -> spec.text("{mcpSystemPrompt}").param("mcpSystemPrompt", mcpSystemPrompt))
+                .options(mcpChatOptions)
+                .user(message)
+                .advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, chatId))
+                // Spring AI 1.1.x 通过 toolCallbacks 获取 Provider 提供的 MCP 工具。
+                .toolCallbacks(toolCallbackProvider)
+                .call()
+                .chatResponse();
+        if (response == null || response.getResult() == null || response.getResult().getOutput() == null) {
+            throw new IllegalStateException("模型未返回有效回复");
+        }
+        String content = response.getResult().getOutput().getText();
+        log.info("心理树洞 MCP 对话调用完成");
         return content;
     }
 

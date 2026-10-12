@@ -3,6 +3,11 @@ spring:
     name: AI-Agent
   profiles:
     active: local
+  ai:
+    mcp:
+      client:
+        stdio:
+          servers-configuration: classpath:mcp-servers.json
 # 本地知识库向量持久化配置
 rag:
   vector-store:

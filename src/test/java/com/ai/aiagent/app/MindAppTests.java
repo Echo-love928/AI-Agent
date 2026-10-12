@@ -1,6 +1,7 @@
 package com.ai.aiagent.app;
 
 import com.alibaba.cloud.ai.autoconfigure.dashscope.DashScopeChatAutoConfiguration;
+import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import com.ai.aiagent.rag.QueryRewriter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -19,6 +20,7 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.support.ToolCallbacks;
 import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -31,6 +33,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.tuple;
@@ -118,6 +121,7 @@ class MindAppTests {
                 .withUserConfiguration(MindApp.class, QueryRewriter.class)
                 .withBean("mindAppVectorStore", VectorStore.class, () -> mock(VectorStore.class))
                 .withBean("allTools", ToolCallback[].class, () -> new ToolCallback[0])
+                .withBean(ToolCallbackProvider.class, () -> () -> new ToolCallback[0])
                 .withPropertyValues("spring.ai.dashscope.api-key=test-key")
                 .run(context -> {
                     assertThat(context).hasNotFailed();
@@ -257,6 +261,72 @@ class MindAppTests {
         assertThat(userMessages(prompts.get(3)))
                 .containsExactly("我叫小明", "帮我查看工具返回的建议", "继续聊聊");
         assertThat(prompts.get(3).getOptions()).isNull();
+    }
+
+    @Test
+    void bindsAllMcpToolsFromInjectedProviderAndSharesConversationMemory() throws IOException {
+        String originalSystemPrompt = new ClassPathResource("prompts/psychological-support-system.txt")
+                .getContentAsString(StandardCharsets.UTF_8);
+        List<Prompt> prompts = new ArrayList<>();
+        ToolCallback firstTool = ToolCallbacks.from(new TestTools())[0];
+        ToolCallback secondTool = ToolCallbacks.from(new McpTestTools())[0];
+        ToolCallbackProvider provider = mock(ToolCallbackProvider.class);
+        when(provider.getToolCallbacks()).thenReturn(new ToolCallback[]{firstTool, secondTool});
+
+        new ApplicationContextRunner()
+                .withUserConfiguration(MindApp.class)
+                .withBean("dashScopeChatModel", ChatModel.class, () -> {
+                    ChatModel model = mock(ChatModel.class);
+                    when(model.getDefaultOptions()).thenReturn(DashScopeChatOptions.builder()
+                            .model("configured-model").multiModel(true).temperature(0.7).build());
+                    when(model.call(any(Prompt.class))).thenAnswer(invocation -> {
+                        prompts.add(invocation.getArgument(0));
+                        return new ChatResponse(List.of(new Generation(new AssistantMessage("测试回复"))));
+                    });
+                    return model;
+                })
+                .withBean("mindAppVectorStore", VectorStore.class, () -> mock(VectorStore.class))
+                .withBean(QueryRewriter.class, () -> mock(QueryRewriter.class))
+                .withBean("allTools", ToolCallback[].class, () -> new ToolCallback[0])
+                // 使用不同于字段名的 Bean 名称，验证 @Resource 按类型回退注入。
+                .withBean("mcpToolCallbackProvider", ToolCallbackProvider.class, () -> provider)
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    MindApp app = context.getBean(MindApp.class);
+                    app.doChat("我叫小明", "mcp-chat");
+                    assertThat(app.doChatWithMcp("帮我查询附近的公园", "mcp-chat")).isEqualTo("测试回复");
+                    app.doChatWithMcp("查询另一个城市的公园", "other-mcp-chat");
+                    app.doChat("继续聊聊", "mcp-chat");
+
+                    for (Prompt prompt : prompts.subList(1, 3)) {
+                        assertThat(prompt.getSystemMessage().getText().replace("\r\n", "\n"))
+                                .startsWith(originalSystemPrompt)
+                                .contains("MCP 地图工具使用规则", "city 为“潮州”");
+                        assertThat(prompt.getOptions()).isInstanceOf(ToolCallingChatOptions.class);
+                        assertThat(((ToolCallingChatOptions) prompt.getOptions()).getToolCallbacks())
+                                .containsExactly(firstTool, secondTool);
+                        assertThat(prompt.getOptions().getTemperature()).isZero();
+                        assertThat(prompt.getOptions().getModel()).isEqualTo("configured-model");
+                        assertThat(((DashScopeChatOptions) prompt.getOptions()).getMultiModel()).isTrue();
+                    }
+                    assertThat(userMessages(prompts.get(1))).containsExactly("我叫小明", "帮我查询附近的公园");
+                    assertThat(userMessages(prompts.get(2))).containsExactly("查询另一个城市的公园");
+                    assertThat(userMessages(prompts.get(3)))
+                            .containsExactly("我叫小明", "帮我查询附近的公园", "继续聊聊");
+                    assertThat(prompts.get(3).getOptions().getTemperature()).isEqualTo(0.7);
+                    assertThat(((DashScopeChatOptions) prompts.get(3).getOptions()).getToolCallbacks()).isEmpty();
+                    assertThat(prompts.get(0).getSystemMessage().getText()).isEqualTo(originalSystemPrompt);
+                    assertThat(prompts.get(3).getSystemMessage().getText()).isEqualTo(originalSystemPrompt);
+                    verify(provider, times(2)).getToolCallbacks();
+                });
+    }
+
+    static class McpTestTools {
+
+        @Tool(description = "返回测试公园")
+        String nearbyPark() {
+            return "测试公园";
+        }
     }
 
     static class TestTools {
