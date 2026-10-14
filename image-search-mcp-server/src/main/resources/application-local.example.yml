@@ -1,0 +1,2 @@
+pixabay:
+  api-key: ${PIXABAY_API_KEY:}

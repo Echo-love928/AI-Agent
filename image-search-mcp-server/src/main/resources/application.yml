@@ -1,0 +1,11 @@
+spring:
+  config:
+    import: optional:classpath:application-local.yml
+  application:
+    name: image-search-mcp-server
+  profiles:
+    active: stdio
+server:
+  port: 8127
+pixabay:
+  api-key: ${PIXABAY_API_KEY:}

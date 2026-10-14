@@ -45,6 +45,16 @@ Spring Boot 后端，接入 Spring AI Alibaba 和 DashScope 大模型。
 
 当前地图服务检查和 9 项单元测试已通过，但最新 3 次自动调用仅 1 次完整通过。集成测试会报告未调用工具的失败；提示词与低温度不能保证每次调用，稳定的业务约束仍需进一步实现意图路由和工具选择控制。
 
+## MCP 图片搜索服务
+
+`image-search-mcp-server` 使用 Pixabay 搜索图片，通过 `ToolCallbackProvider` 注册 `searchImage` 工具，返回中等尺寸图片地址。默认使用 stdio；切换到 `sse` profile 可运行 HTTP 服务。
+
+在环境变量中设置 `PIXABAY_API_KEY`，或把子项目的 `application-local.example.yml` 复制为同目录下的 `application-local.yml`，填写 `pixabay.api-key`。本地配置已被 Git 忽略。
+
+先执行 `mvnw.cmd -f image-search-mcp-server/pom.xml -DskipTests package` 构建服务，再按 `mcp-servers.example.json` 配置主项目；图片服务与地图服务放在同一层 `mcpServers` 下。从仓库根目录启动主项目，客户端会自动启动图片服务 JAR。
+
+本地单元测试：`mvnw.cmd -f image-search-mcp-server/pom.xml -Dtest=ImageSearchToolUnitTest,ImageSearchMcpServerApplicationTests test`。配置模型和真实 MCP 服务后，在测试进程设置 `RUN_MCP_INTEGRATION_TESTS=true`，运行 `mvnw.cmd -Dtest=MindAppMcpIntegrationTests#doChatWithImageSearchMcp test`，查看图片地址及最终回复。
+
 ## 配置与隐私
 
 `application-local.yml`、`mcp-servers.json`、`.env`、日志、IDE 配置和构建产物不提交到仓库。

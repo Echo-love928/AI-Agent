@@ -28,7 +28,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 配置 DashScope 和地图 MCP 服务后，设置 RUN_MCP_INTEGRATION_TESTS=true 运行。
+ * 配置 DashScope 和所需的地图或图片搜索 MCP 服务后，设置 RUN_MCP_INTEGRATION_TESTS=true 运行。
  */
 @SpringBootTest
 @EnabledIfEnvironmentVariable(named = "RUN_MCP_INTEGRATION_TESTS", matches = "true")
@@ -57,6 +57,43 @@ class MindAppMcpIntegrationTests {
         Files.createDirectories(resultFile.getParent());
         Files.writeString(resultFile, result);
         assertThat(readPlaceNames(result)).as("地图 MCP 应返回真实地点").isNotEmpty();
+    }
+
+    @Test
+    void doChatWithImageSearchMcp() {
+        String chatId = UUID.randomUUID().toString();
+        String message = "帮我搜索一些能够缓解压力的图片";
+
+        ToolCallbackProvider originalProvider = (ToolCallbackProvider)
+                ReflectionTestUtils.getField(mindApp, "toolCallbackProvider");
+        assertThat(originalProvider).isNotNull();
+        ObservedTool[] observedTools = Arrays.stream(originalProvider.getToolCallbacks())
+                .map(ObservedTool::new).toArray(ObservedTool[]::new);
+        assertThat(observedTools).as("MCP 服务应注册图片搜索工具")
+                .anyMatch(tool -> tool.getToolDefinition().name().endsWith("searchImage"));
+
+        ReflectionTestUtils.setField(mindApp, "toolCallbackProvider",
+                (ToolCallbackProvider) () -> observedTools);
+        String answer;
+        try {
+            answer = mindApp.doChatWithMcp(message, chatId);
+        } finally {
+            ReflectionTestUtils.setField(mindApp, "toolCallbackProvider", originalProvider);
+        }
+
+        System.out.printf("用户：%s%nAI：%s%n", message, answer);
+        assertThat(answer).isNotNull().isNotBlank();
+        List<Invocation> searches = Arrays.stream(observedTools)
+                .filter(tool -> tool.getToolDefinition().name().endsWith("searchImage"))
+                .flatMap(tool -> tool.invocations.stream()).toList();
+        assertThat(searches).as("模型应调用图片搜索 MCP；实际回复：%s", answer).isNotEmpty();
+        for (Invocation search : searches) {
+            System.out.printf("图片搜索参数：%s%n图片搜索结果：%s%n", search.input(), search.result());
+            assertThat(search.result()).as("图片搜索 MCP 应返回图片地址")
+                    .isNotBlank()
+                    .doesNotContain("Error search image:")
+                    .contains("https://");
+        }
     }
 
     @RepeatedTest(3)
