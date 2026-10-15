@@ -6,6 +6,9 @@ spring:
   ai:
     mcp:
       client:
+        # 冷启动 npx 或 Debug 暂停后，允许 MCP 服务在两分钟内完成握手。
+        # McpClientConfiguration 将此值同步用于 SDK 独立的初始化超时。
+        request-timeout: 120s
         stdio:
           servers-configuration: classpath:mcp-servers.json
 # 本地知识库向量持久化配置

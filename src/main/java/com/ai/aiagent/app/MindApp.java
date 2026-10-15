@@ -23,6 +23,7 @@ import org.springframework.core.io.Resource;
 import org.springframework.core.task.SyncTaskExecutor;
 import org.springframework.stereotype.Component;
 import org.springframework.util.Assert;
+import reactor.core.publisher.Flux;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -108,6 +109,21 @@ public class MindApp {
         String content = response.getResult().getOutput().getText();
         log.info("心理树洞对话调用完成");
         return content;
+    }
+
+    /**
+     * 流式回复用户，沿用同一 chatId 的对话记忆。
+     */
+    public Flux<String> doChatByStream(String message, String chatId) {
+        Assert.hasText(message, "message 不能为空");
+        Assert.hasText(chatId, "chatId 不能为空");
+
+        return chatClient
+                .prompt()
+                .user(message)
+                .advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, chatId))
+                .stream()
+                .content();
     }
 
     /**
