@@ -1,5 +1,6 @@
 package com.ai.aiagent.controller;
 
+import com.ai.aiagent.agent.Manus;
 import com.ai.aiagent.app.MindApp;
 import jakarta.annotation.Resource;
 import org.springframework.ai.chat.model.ChatModel;
@@ -35,5 +36,18 @@ public class AiController {
     public Flux<String> doChatWithMindAppSSE(String message, String chatId) {
         return MindApp.doChatByStream(message, chatId);
     }
+
+    /**
+     * 流式调用 Manus 超级智能体
+     *
+     * @param message
+     * @return
+     */
+    @GetMapping("/manus/chat")
+    public SseEmitter doChatWithManus(String message) {
+        Manus Manus = new Manus(allTools, dashscopeChatModel);
+        return Manus.runStream(message);
+    }
+
 
 }
